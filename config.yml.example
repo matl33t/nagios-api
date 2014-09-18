@@ -1,0 +1,8 @@
+global:
+  host: xx.xx.xx.xx
+  port: xxxx
+
+ncli:
+  author: name_api
+  refresh_cache: 15
+
