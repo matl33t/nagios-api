@@ -18,8 +18,8 @@ Usage:
     ncli services -p -h staging-1
                         Matches problematic services with hostname containing staging-1
                         (NOTE: This will include staging-1-app2 etc)
-    ncli services -h ^staging-1$
-                        Matches all services with hostname matching exactly staging-1
+    ncli services -h ^staging-1$ show -x
+                        Matches all services with hostname matching exactly staging-1 with extended information
     ncli services -s "haproxy|memcached" disable-notifications
                         Disables notifications for all services with description containing haproxy or memcached
     ncli services -ph staging-15 -s unicorn ack --comment "fixing this"
@@ -381,7 +381,21 @@ def match_services(args, opts):
     return 0
 
 def action_show(opts, matches):
-    [ obj.pp() for obj in matches ]
+    '''Displays information for services. Usage:
+        -x --extended      	Prints extended information for the services.
+
+    '''
+    p = OptionParser(usage=trim(action_show.__doc__))
+    p.disable_interspersed_args()
+    p.add_option('-x', '--extended', dest='extended', action='store_true',
+        help="Prints extended information for the services.")
+    (options, args) = p.parse_args(opts)
+
+    if options.extended:
+        [ obj.xp() for obj in matches ]
+    else:
+        [ obj.pp() for obj in matches ]
+    return 0
 
 def action_acknowledge_services(opts, services):
     '''Acknowledge problem for a service. Usage:
@@ -394,9 +408,10 @@ def action_acknowledge_services(opts, services):
         --persistent=TRUE/FALSE	[defaults to FALSE] If TRUE, the comment will remain after the
                                 host returns to "OK" state.
         --author=STR		[defaults to "nagios-api"] Who is doing the acknowledging.
+
     '''
     defaults = CONFIG['ncli']['commenting']
-    p = OptionParser(usage=trim(do_acknowledge_problem.__doc__))
+    p = OptionParser(usage=trim(action_acknowledge_services.__doc__))
     p.disable_interspersed_args()
     p.add_option('-c', '--comment', dest='comment', action='store',
         help="Comment on the acknowledged problem.")

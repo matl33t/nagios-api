@@ -62,14 +62,14 @@ def status_to_s(state):
     return status_map[state]
 
 class HostOrService:
-    req_attrs = ['current_state', 'plugin_output',
-            'notifications_enabled', 'last_check', 'last_notification',
-            'active_checks_enabled', 'problem_has_been_acknowledged',
-            'last_hard_state', 'scheduled_downtime_depth', 'performance_data',
-            'last_state_change', 'current_attempt', 'max_attempts']
 
     def __init__(self, name, attributes):
-        self.name = name.decode('utf-8') #TODO not sure if necessary
+        self.req_attrs = ['name', 'current_state', 'plugin_output',
+                'notifications_enabled', 'last_check', 'last_notification',
+                'active_checks_enabled', 'problem_has_been_acknowledged',
+                'last_hard_state', 'scheduled_downtime_depth', 'performance_data',
+                'last_state_change', 'current_attempt', 'max_attempts']
+        attributes['name'] = name.decode('utf-8') #TODO not sure if necessary
         for attr in self.req_attrs:
             setattr(self, attr, attributes[attr])
         self.current_state = status_to_s(attributes['current_state'])
@@ -83,20 +83,14 @@ class Host(HostOrService):
         self.services[svc.service] = svc
 
 class Service(HostOrService):
+
     def __init__(self, name, attributes, host = None):
-        HostOrService.__init__(self, name, attributes)
         self.host = host.decode('utf-8')
+        HostOrService.__init__(self, name, attributes)
+        self.req_attrs.insert(1, 'host')
 
     def pp(self, opts = None):
-        color = None
-        if self.current_state == 'CRIT':
-            color = txtcolor.CRIT
-        elif self.current_state == 'WARN':
-            color = txtcolor.WARN
-        elif self.current_state == 'UNK':
-            color = txtcolor.UNK
-        else:
-            color = txtcolor.OK
+        color = getattr(txtcolor, self.current_state)
         print color + "%s\t%s\t%s\t%s\t%s\t%s" % (
           self.host.ljust(25),
           self.name[:35].ljust(35),
@@ -107,5 +101,11 @@ class Service(HostOrService):
         ) + txtcolor.ENDC
 
     def xp(self, opts = None):
-        pass
+        color = getattr(txtcolor, self.current_state)
+        for i, attr in enumerate(self.req_attrs):
+            print color + "%s\t%s" % (
+                (attr + ':').ljust(25),
+                getattr(self, attr)
+            ) + txtcolor.ENDC
+        print ''
 
