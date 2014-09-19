@@ -1,0 +1,18 @@
+global:
+  host: xx.xx.xx.xx
+  port: xxxx
+
+nagios-api:
+  cmd: /var/lib/nagios/rw/nagios.cmd
+  status: /var/cache/nagios/status.dat
+  log: /var/log/nagios/nagios.log
+
+ncli:
+  refresh_cache: 60
+  commenting:
+    author: name_api
+    sticky: False # true - ack hangs around until host reaches OK state | false - next state change
+    notify: False # true - sends email about your ack
+    persistent: False # true - comment remains after host returns to normal OK
+
+

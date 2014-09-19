@@ -1,0 +1,546 @@
+#!/usr/bin/env python
+
+'''
+This script uses the JSON Nagios API to issue commands to Nagios. The
+goal is to make your life easier. If it doesn't, please return it
+unharmed and let me know what went wrong and I'll make it better.
+
+Usage:
+    ncli [base options] services|hosts [service match options] action [action options]
+
+    Base Options:
+    '-r', '--refresh'     Refreshes the cached nagios status file.
+    '--raw'               Allows sending raw JSON directly to the server.
+    ============================================================================
+    Examples:
+    ncli                Defaults to [ncli services show] - all services in compact view
+    ncli services -p    Shows all problematic services
+    ncli services -p -h staging-1
+                        Matches problematic services with hostname containing staging-1
+                        (NOTE: This will include staging-1-app2 etc)
+    ncli services -h ^staging-1$ show -x
+                        Matches all services with hostname matching exactly staging-1 with extended information
+    ncli services -s "haproxy|memcached" disable-notifications
+                        Disables notifications for all services with description containing haproxy or memcached
+    ncli services -ph staging-15 -s unicorn ack --comment "fixing this"
+                        Acknowledges all problematic services with host containing staging-15 and
+                        description containing unicorn with provided comment and the default settings from config.yml
+
+    Actions:
+        show (default)
+        acknowledge
+        [enable|disable]-notifications
+
+        WIP
+        [enable|disable]-event-handlers
+        [enable|disable]-active-checks
+        reschedule-check
+        global [enable|disable]-notifications
+        global [enable|disable]-event-handlers
+
+Copyright 2011-2013 by Bump Technologies, Inc and other authors and
+contributors. See the LICENSE file for full licensing information.
+Update 2014 by mleung@lumoslabs.com
+
+'''
+
+import re
+import requests
+import sys
+import yaml
+from json import load, dump, loads, dumps
+from ncli_utils import *
+from optparse import OptionParser, OptionGroup
+from os import path, remove
+from time import time
+
+
+STATE = None
+CONFIG = None
+URL = None  # To the Nagios API "http://foo:6315"
+
+def main(argv):
+    '''Where the fun begins. Actually do something useful.
+
+    '''
+    global CONFIG, STATE, URL
+
+    config_path = "%s/config.yml" % path.dirname(path.realpath(__file__))
+    with open(config_path) as yml:
+        CONFIG = yaml.load(yml)
+    URL = "http://%s:%d" % (CONFIG['global']['host'], CONFIG['global']['port'])
+
+    # Parse out command line options
+    p = OptionParser(usage=trim(__doc__))
+    p.disable_interspersed_args()
+    p.add_option('-r', '--rf', '--refresh', dest='rf', action='store_true', help='Refresh cached status file')
+    p.add_option('--raw', dest='raw', action='store_true', help='Enable raw mode for the CLI')
+    (opts, args) = p.parse_args(argv[1:])
+
+    # If no more arguments, show usage
+    if len(args) <= 0:
+        args = ['services']
+
+    # If we're in raw mode, bail out for that now
+    if opts.raw:
+        return do_raw(args)
+
+    if opts.rf:
+        invalidate_cache()
+
+    if  path.isfile(cache_path()) and \
+            time() < path.getmtime(cache_path()) + CONFIG['ncli']['refresh_cache']:
+        with open(cache_path(), 'r') as cache:
+            STATE = load(cache)
+    else:
+        print 'Fetching status file...'
+        data = api(['state'])
+        if isinstance(data, dict):
+            if data['success']:
+                with open(cache_path(), 'w') as cache:
+                    STATE = data['content']
+                    dump(STATE, cache)
+                    print '-----------------------'
+            else:
+                return critical('Failed to load objects from nagios-api')
+        else:
+            return critical('Failed to load objects from nagios-api')
+
+    #NAGIOS = api(['objects'])
+    # args will now contain the subcommand, some positional arguments,
+    # and then the dashed options. Split them.
+    command, posargs, otherargs = args[0], [], []
+    for arg in args[1:]:
+        if len(otherargs) > 0:
+            otherargs.append(arg)
+            continue
+        if arg[0] == '-':
+            otherargs.append(arg)
+        else:
+            posargs.append(arg)
+
+    # Dispatch table and then dispatch
+    dispatch = {
+        'schedule-downtime': do_schedule_downtime,
+        'cancel-downtime': do_cancel_downtime,
+        'services': match_services,
+        'hosts': match_hosts,
+    }
+    for cmd in dispatch:
+        if re.match(r'^' + command, cmd):
+            return dispatch[cmd](posargs, otherargs)
+    p.error('Command not found, see the usage')
+
+
+def api(args):
+    '''Send a call out to the API. Returns the response object (dict) or
+    an integer exit code on failure.
+
+    '''
+    global URL
+
+    # The rest of the data is now in args, build the URL
+    verb = args[0]
+    objid = args[1] if len(args) >= 2 and args[1].isdigit() else ''
+    url = '%s/%s/%s' % (URL, verb, objid)
+
+    # Now build the reqobj
+    obj = {}
+    for kv in args[2 if objid else 1:]:
+        if not '=' in kv:
+            return critical('Parameter "%s" does not conform to expected key=value format' % kv)
+        key, value = kv.split('=', 1)
+        obj[key] = value
+
+    # Set the method to POST if we recognize the verb or if there is a payload
+    method = 'POST' if len(obj) > 0 else 'GET'
+    if verb in ('cancel_downtime'):
+        method = 'POST'
+    payload = dumps(obj) if method == 'POST' else None
+
+    # Construct the request object to send it out
+    try:
+        if payload is None:
+            res = requests.get(url)
+        else:
+            res = requests.post(url, data=payload,
+                    headers={'Content-Type': 'application/json'})
+    except (requests.ConnectionError, requests.Timeout):
+        return critical('Failed connecting to nagios-api server')
+    if res is None:
+        return critical('Failed requesting resource')
+
+    # Probably a JSON response, get it
+    try:
+        if (res.headers['content-encoding'] == "gzip"):
+            resobj = loads(res.content)
+        else:
+            resobj = loads(res.text)
+    except ValueError:
+        return critical('Failed parsing server response')
+    except TypeError:
+        return critical('Failed parsing JSON in server response')
+    return resobj
+
+
+def do_schedule_downtime(cmd, args, opts):
+    '''Create a scheduled downtime for a host or service. Usage:
+
+        %prog schedule-downtime <host> [service] <duration> [opts]
+
+    host must be a hostname that Nagios knows about. If specified,
+    service is a service that exists on that host. This combination of
+    host and optional service indicates what you want the downtime to be
+    scheduled on.
+
+    The duration must be of the format like "2h". You can use w, d, h,
+    m, or s as units. Seconds are assumed if you don't specify the units.
+
+    Available options:
+
+        --recursive       Schedule downtime for all services on this host.
+                          You must not specify a specific service.
+
+        --author=NAME     Specify an author to record this downtime for.
+
+        --comment=TEXT    Leave descriptive text about the downtime.
+
+    Example:
+
+        %prog schedule-downtime web01 2h
+            # schedule two hours of downtime for web01
+
+        %prog schedule-downtime web01 "PING Check" 1w
+            # schedule one week of downtime for PING Check on web01
+
+        %prog schedule-downtime web03 1d --recursive
+            # schedule one day of downtime for web03 and ALL services on it
+
+    NOTE: This command schedules a fixed downtime that starts
+    immediately and lasts for the specified duration.
+
+    '''
+    p = OptionParser(usage=trim(do_schedule_downtime.__doc__))
+    p.disable_interspersed_args()
+    p.add_option('-a', '--author', dest='author', metavar='NAME',
+        help='Author to blame for this downtime')
+    p.add_option('-c', '--comment', dest='comment', metavar='TEXT',
+        help='Explanatory comment to leave on the downtime')
+    p.add_option('-r', '--recursive', dest='recursive', action='store_true',
+        help='Schedule for all services on the given host')
+    p.set_defaults(recursive=False, author=None, comment=None)
+
+    selargs = consume_host_service(args)
+    if selargs is None:
+        p.error('Failed to locate host/service to schedule downtime for')
+    if len(args) <= 0:
+        p.error('Must specify a duration in a format like "2h"')
+    secs = time_to_seconds(args[0])
+    if secs is None:
+        p.error('Invalid duration, must be in a format like "2h"')
+    selargs += ['duration=%d' % secs]
+
+    (options, args) = p.parse_args(opts)
+    if options.recursive:
+        selargs += ['services_too=true']
+    if options.author is not None:
+        selargs += ['author=%s' % options.author]
+    if options.comment is not None:
+        selargs += ['comment=%s' % options.comment]
+
+    res = api(['schedule_downtime'] + selargs)
+    if isinstance(res, int):
+        return res
+    if not isinstance(res, dict):
+        return critical('API returned unknown object type')
+    if not res['success']:
+        return critical('Failed: %s' % res['content'])
+    return 0
+
+
+def do_cancel_downtime(cmd, args, opts):
+    '''Cancel a scheduled downtime for a host or service. Usage:
+
+        %prog cancel-downtime <host> [service] [opts]
+
+    host must be a hostname that Nagios knows about. If specified,
+    service is a service that exists on that host. This combination of
+    host and optional service indicates what you want the downtime to be
+    cancelled from.
+
+    Available options:
+
+        --recursive       Cancel downtime for all services on this host.
+                          You must not specify a specific service.
+
+    Example:
+
+        %prog cancel-downtime web01
+            # cancel downtime for web01
+
+        %prog cancel-downtime web01 "PING Check"
+            # cancel downtime for PING Check on web01
+
+        %prog cancel-downtime web03 --recursive
+            # cancel downtime for web03 and ALL services on it
+
+    NOTE: If you have just scheduled the downtime through the API, note
+    that it may take a little while before you can cancel it. Nagios
+    is not instant and it may not write out the status file (with the
+    downtime id) for some time.
+
+    '''
+    p = OptionParser(usage=trim(do_cancel_downtime.__doc__))
+    p.disable_interspersed_args()
+    p.add_option('-r', '--recursive', dest='recursive', action='store_true',
+        help='Cancel for all services on the given host')
+    p.set_defaults(recursive=False, author=None, comment=None)
+
+    selargs = consume_host_service(args)
+    if selargs is None:
+        p.error('Failed to locate host/service to cancel downtime for')
+
+    (options, args) = p.parse_args(opts)
+    if options.recursive:
+        selargs += ['services_too=true']
+
+    res = api(['cancel_downtime'] + selargs)
+    if isinstance(res, int):
+        return res
+    if not isinstance(res, dict):
+        return critical('API returned unknown object type')
+    if not res['success']:
+        return critical('Failed: %s' % res['content'])
+    return 0
+
+
+def match_hosts(args, opts):
+    critical("This feature is currently unsupported. Sorry about that.")
+
+def match_services(args, opts):
+    '''TODO
+
+    '''
+    global STATE
+    p = OptionParser(add_help_option=False)
+    p.disable_interspersed_args()
+    p.add_option('-h', '--host', dest='host', action='store',
+            help="Only match services matching host regex.")
+    p.add_option('-p', '--problem', dest='problem', action='store_true',
+        help="Only match services that are in a non-OK state.")
+    p.add_option('-s', '--service', dest='service', action='store',
+        help="Only match services matching service regex.")
+    p.set_defaults(host=".*",service=".*",problem=False)
+    (options, args) = p.parse_args(opts)
+
+    service_matches = []
+    for (hostname, hostdata) in STATE.iteritems():
+        for (svcname, svcdata) in hostdata['services'].iteritems():
+            svc = Service(svcname, svcdata, hostname)
+            if options.problem and svc.current_state == 'OK':
+                continue
+            if re.search(options.host, svc.host.lower()) == None:
+                continue
+            if re.search(options.service, svc.name.lower()) == None:
+                continue
+            service_matches.append(svc)
+
+    if len(service_matches) < 1:
+        return critical("Could not find a service matching the conditions host:/%s/, service:/%s/, problem:%s" % (options.host, options.service, options.problem))
+
+    if len(args) < 1:
+        args = 'show'
+
+    # args will now contain the subcommand, some positional arguments,
+    # and then the dashed options. Split them.
+    command, posargs, otherargs = args[0], [], []
+    for arg in args[1:]:
+        if len(otherargs) > 0:
+            otherargs.append(arg)
+            continue
+        if arg[0] == '-':
+            otherargs.append(arg)
+        else:
+            posargs.append(arg)
+
+    # Dispatch table and then dispatch
+    dispatch = {
+        'show': action_show,
+        'ack': action_acknowledge_services,
+        'acknowledge': action_acknowledge_services,
+        'notify': action_notifications_services,
+        'notification': action_notifications_services,
+        'notifications': action_notifications_services,
+        'enable-notifications': action_enable_notifications_services,
+        'disable-notifications': action_disable_notifications_services,
+    }
+    for cmd in dispatch:
+        if re.match(r'^' + command, cmd):
+            return dispatch[cmd](otherargs, service_matches)
+    p.error('Command not found, see the usage')
+    return 0
+
+def action_show(opts, matches):
+    '''Displays information for services. Usage:
+        -x --extended      	Prints extended information for the services.
+
+    '''
+    p = OptionParser(usage=trim(action_show.__doc__))
+    p.disable_interspersed_args()
+    p.add_option('-x', '--extended', dest='extended', action='store_true',
+        help="Prints extended information for the services.")
+    (options, args) = p.parse_args(opts)
+
+    if options.extended:
+        [ obj.xp() for obj in matches ]
+    else:
+        [ obj.pp() for obj in matches ]
+    return 0
+
+def action_acknowledge_services(opts, services):
+    '''Acknowledge problem for a service. Usage:
+        --comment=TEXT   	Comment on the acknowledged problem.
+        --sticky=TRUE/FALSE  	[defaults to TRUE] If sticky, an acknowledgement hangs around
+                                until a host reaches "OK" - otherwise, it goes away on next
+                                state change.
+        --notify=TRUE/FALSE	[defaults to TRUE] If TRUE, sends notification that an
+                                acknowledgement has occurred.
+        --persistent=TRUE/FALSE	[defaults to FALSE] If TRUE, the comment will remain after the
+                                host returns to "OK" state.
+        --author=STR		[defaults to "nagios-api"] Who is doing the acknowledging.
+
+    '''
+    defaults = CONFIG['ncli']['commenting']
+    p = OptionParser(usage=trim(action_acknowledge_services.__doc__))
+    p.disable_interspersed_args()
+    p.add_option('-c', '--comment', dest='comment', action='store',
+        help="Comment on the acknowledged problem.")
+    p.add_option('-s', '--sticky', dest='sticky', action='store_false',
+        help='Does acknowledgement hang around until "OK" reached by host?')
+    p.add_option('-n', '--notify', dest='notify', action='store_false',
+        help='Should we send a notification of the acknowledgment?')
+    p.add_option('-p', '--persistent', dest='persistent', action='store_true',
+        help='Should the comment hang around after the problem expires?')
+    p.add_option('-a', '--author', dest='author', action='store',
+        help='Name appearing for who does the acknowledgment.')
+    p.set_defaults(
+            sticky=defaults['sticky'],
+            notify=defaults['notify'],
+            persistent=defaults['persistent'],
+            author=defaults['author']
+    )
+    (options, args) = p.parse_args(opts)
+
+    shared_args = []
+    if options.comment:
+        shared_args += ["comment=%s" % options.comment]
+    else:
+        return critical('Did not include comment when required!')
+    shared_args += ["sticky=%s" % int(options.sticky)]
+    shared_args += ["notify=%s" % int(options.notify)]
+    shared_args += ["persistent=%s" % int(options.persistent)]
+    if options.author:
+        shared_args += ['author=%s' % options.author]
+
+    action = 'acknowledge_problem'
+    for svc in services:
+        post_args = shared_args[:]
+        post_args += ["host=%s" % svc.host]
+        post_args += ["service=%s" % svc.name]
+
+        print "Executing action \"%s\" with options=\"%s\"..." % (action, post_args)
+        res = api([action] + post_args)
+        if isinstance(res, int):
+            return res
+        if not isinstance(res, dict):
+            return critical("API returned unknown object type")
+        if not res["success"]:
+            return critical("Failed: %s" % res['content'])
+
+    invalidate_cache()
+    return 0
+
+def action_enable_notifications_services(opts, services):
+    action_notifications_services(['--enable'], services)
+def action_disable_notifications_services(opts, services):
+    action_notifications_services(['--disable'], services)
+
+def action_notifications_services(opts, services):
+    '''Enable/disable notifications for a service.
+        Available options:
+        -d, --disable     Disables notifications
+        -e, --enable      Enables notifications
+
+    '''
+    p = OptionParser(usage=trim(action_notifications_services.__doc__))
+    p.disable_interspersed_args()
+    p.add_option('-d', '--disable', dest='enable', action='store_false',
+        help='Disable notifications for service')
+    p.add_option('-e', '--enable', dest='enable', action='store_true',
+        help='Enable notifications for service')
+    p.set_defaults(enable=None)
+    (options, args) = p.parse_args(opts)
+    if options.enable == None:
+        p.error("The notify action requires you to add either --disable or --enable.")
+
+    action = 'enable_notifications' if options.enable else 'disable_notifications'
+    for svc in services:
+        post_args = [
+                "host=%s" % svc.host,
+                "service=%s" % svc.name
+        ]
+        print "Executing action \"%s\" with options=\"%s\"..." % (action, post_args)
+        res = api([action] + post_args)
+        if isinstance(res, int):
+            return res
+        if not isinstance(res, dict):
+            return critical('API returned unknown object type')
+        if not res['success']:
+            return critical('Failed: %s' % res['content'])
+
+    invalidate_cache()
+    return 0
+
+
+def do_raw(args):
+    '''Allows the user to interact with the API directly and use this
+    CLI as a JSON generator. Please know what you're doing.
+
+    '''
+    resobj = api(args)
+    if isinstance(resobj, int):
+        return resobj
+    if not isinstance(resobj, dict):
+        return critical('API returned unknown object type')
+
+    # Protocol failure check
+    if not resobj['success']:
+        return critical('Failure: %s' % resobj['content'])
+
+    # These are simple responses, we can handle them here
+    if type(resobj['content']) is str:
+        print resobj['content']
+    else:
+        print dumps(resobj['content'])
+    return 0
+
+def critical(msg, retval=1):
+    '''Print a message to STDERR and return a failure code.
+
+    '''
+    print >>sys.stderr, txtcolor.CRIT + msg + txtcolor.ENDC
+    return retval
+
+def cache_path():
+    return "%s/cache.json" % path.dirname(path.realpath(__file__))
+
+def invalidate_cache():
+    try:
+        remove(cache_path())
+    except OSError:
+        pass
+
+
+
+if __name__ == '__main__':
+    sys.exit(main(sys.argv[0:]))
