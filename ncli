@@ -116,6 +116,7 @@ def main(argv):
             else:
                 return critical('Failed to load objects from nagios-api')
 
+    NAGIOS = api(['objects'])
     # args will now contain the subcommand, some positional arguments,
     # and then the dashed options. Split them.
     command, posargs, otherargs = args[0], [], []
@@ -486,6 +487,7 @@ def do_acknowledge_problem(cmd, args, opts):
             # acknowledge problem on HTTP service for web03 with comment "Critical Failure"
 
     '''
+    defaults = CONFIG['ncli']['commenting']
     p = OptionParser(usage=trim(do_acknowledge_problem.__doc__))
     p.disable_interspersed_args()
     p.add_option('-c', '--comment', dest='comment', action='store',
@@ -498,7 +500,12 @@ def do_acknowledge_problem(cmd, args, opts):
         help='Should the comment hang around after the problem expires?')
     p.add_option('-a', '--author', dest='author', action='store',
         help='Name appearing for who does the acknowledgment.')
-    p.set_defaults(sticky=True,notify=True,persistent=False,author=None)
+    p.set_defaults(
+            sticky=defaults['sticky'],
+            notify=defaults['notify'],
+            persistent=defaults['persistent'],
+            author=defaults['author']
+    )
 
     selargs = consume_host_service(args)
     if selargs is None:
@@ -635,17 +642,18 @@ def action_acknowledge_services(cmd, opts, services):
     (options, args) = p.parse_args(opts)
 
     for svc in services:
-        post_args = ["host=%s service=%s" % (svc.host, svc.name)]
+        post_args = ["host=%s" % svc.host]
+        post_args += ["service=%s" % svc.name]
         if options.comment:
             post_args += ['comment=%s' % options.comment]
         else:
             return critical('Did not include comment when required!')
-        if options.sticky is not True:
-            post_args += ['sticky=FALSE']
-        if options.notify is not True:
-            post_args += ['notify=FALSE']
-        if options.persistent:
-            post_args += ['persistent=TRUE']
+        #if options.sticky is not True:
+        post_args += ['sticky=0']
+        #if options.notify is not True:
+        post_args += ['notify=0']
+        #if options.persistent:
+        post_args += ['persistent=1']
         if options.author:
             post_args += ['author=%s' % options.author]
 
