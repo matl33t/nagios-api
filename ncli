@@ -1,56 +1,41 @@
 #!/usr/bin/env python
 
-'''usage: %prog <config> <command> [command-options]
+'''
 This script uses the JSON Nagios API to issue commands to Nagios. The
 goal is to make your life easier. If it doesn't, please return it
 unharmed and let me know what went wrong and I'll make it better.
 
 Usage:
-    ncli --host=nagios --port=6315 <command> [command-options]
+    ncli [base options] services|hosts [service match options] action [action options]
 
-This tool operates like git, svn, and other tools you may now -- you
-invoke it, tell it what command to run, and then the rest of the
-arguments vary depending on the command. Some tools don't take any
-options, some take a few required arguments and then some.
+    Base Options:
+    '-r', '--refresh'     Refreshes the cached nagios status file.
+    '--raw'               Allows sending raw JSON directly to the server.
+    ============================================================================
+    Examples:
+    ncli                Defaults to [ncli services show] - all services in compact view
+    ncli services -p    Shows all problematic services
+    ncli services -p -h staging-1
+                        Matches problematic services with hostname containing staging-1
+                        (NOTE: This will include staging-1-app2 etc)
+    ncli services -h ^staging-1$
+                        Matches all services with hostname matching exactly staging-1
+    ncli services -s "haproxy|memcached" disable-notifications
+                        Disables notifications for all services with description containing haproxy or memcached
+    ncli services -ph staging-15 -s unicorn ack --comment "fixing this"
+                        Acknowledges all problematic services with host containing staging-15 and
+                        description containing unicorn with provided comment and the default settings from config.yml
 
-ncli [base options] [service match options] verb
-ncli: everything
-ncli -p: all problems
-ncli -h [match on hostname] -s [match on service description]: all matching services
-ncli -p -h [match on hostname] -s [match on service description]: all matching problematic services
-ncli -p -h [match on hostname] -s [match on service description] ack: begin acknowledgement of all matching problematic services
-ncli -p -h [match on hostname] -s [match on service description] comment: begin comment on all matching problematic services
-ncli [enable|disable]-notifications
-ncli [enable|disable]-event_handlers
-
-Actions:
-    show (default)
-    [enable|disable]-notifications
-    [enable|disable]-event-handlers
-    [enable|disable]-active-checks
-    reschedule-check
-
-
-Status Viewing
-    ncli hosts
-    ncli services <host>
-
-Notification Management
-    ncli disable-notifications <host> [service] [--recursive|r]
-    ncli enable-notifications <host> [service] [--recursive|r]
-
-Downtime Management
-    ncli schedule-downtime <host> [service] <duration>
-        [--recursive|-r] [--author|-a=TEXT] [--comment|-c=TEXT]
-    ncli cancel-downtime <host> [service] [--recursive|-r]
-
-Problem Management
-    ncli acknowledge-problem <host> [service] <--comment|-c=TEXT>
-        [--sticky|-s=TRUE|false] [--notify|-n=TRUE|false]
-        [--persistent|-p=true|FALSE] [--author|-a=TEXT]
+    Actions:
+        show (default)
+        [enable|disable]-notifications
+        [enable|disable]-event-handlers
+        [enable|disable]-active-checks
+        reschedule-check
 
 Copyright 2011-2013 by Bump Technologies, Inc and other authors and
 contributors. See the LICENSE file for full licensing information.
+Update 2014 by mleung@lumoslabs.com
 
 '''
 
@@ -68,14 +53,12 @@ from time import time
 STATE = None
 CONFIG = None
 URL = None  # To the Nagios API "http://foo:6315"
-NAGIOS = {}  # Host => [ Service, Service, Service, ... ]
-
 
 def main(argv):
     '''Where the fun begins. Actually do something useful.
 
     '''
-    global CONFIG, NAGIOS, URL, STATE
+    global CONFIG, STATE, URL
 
     config_path = "%s/config.yml" % path.dirname(path.realpath(__file__))
     with open(config_path) as yml:
@@ -85,7 +68,7 @@ def main(argv):
     # Parse out command line options
     p = OptionParser(usage=trim(__doc__))
     p.disable_interspersed_args()
-    p.add_option('--rf', '--refresh', dest='rf', action='store_true', help='Refresh cached status file')
+    p.add_option('-r', '--rf', '--refresh', dest='rf', action='store_true', help='Refresh cached status file')
     p.add_option('--raw', dest='raw', action='store_true', help='Enable raw mode for the CLI')
     (opts, args) = p.parse_args(argv[1:])
 
@@ -115,8 +98,10 @@ def main(argv):
                     print '-----------------------'
             else:
                 return critical('Failed to load objects from nagios-api')
+        else:
+            return critical('Failed to load objects from nagios-api')
 
-    NAGIOS = api(['objects'])
+    #NAGIOS = api(['objects'])
     # args will now contain the subcommand, some positional arguments,
     # and then the dashed options. Split them.
     command, posargs, otherargs = args[0], [], []
@@ -133,46 +118,13 @@ def main(argv):
     dispatch = {
         'schedule-downtime': do_schedule_downtime,
         'cancel-downtime': do_cancel_downtime,
-        'enable-notifications': do_enable_notifications,
-        'disable-notifications': do_disable_notifications,
-        'acknowledge-problem': do_acknowledge_problem,
-        'hosts': do_hosts,
         'services': match_services,
+        'hosts': match_hosts,
     }
     for cmd in dispatch:
         if re.match(r'^' + command, cmd):
-            return dispatch[cmd](command, posargs, otherargs)
+            return dispatch[cmd](posargs, otherargs)
     p.error('Command not found, see the usage')
-
-
-def cache_path():
-    return "%s/cache.json" % path.dirname(path.realpath(__file__))
-
-def invalidate_cache():
-    try:
-        remove(cache_path())
-    except OSError:
-        pass
-
-def consume_host_service(args):
-    '''Given a list of arguments, attempt to consume a host and service
-    off of the front and return a list containing host=X service=X args
-    that you can send to the API.
-
-    '''
-    global NAGIOS
-    if args is None or len(args) <= 0:
-        return None
-    if args[0] not in NAGIOS:
-        return None
-    host = args[0]
-    selargs = ['host=%s' % host]
-    del args[0]
-
-    if len(args) > 0 and args[0].decode('utf-8') in NAGIOS[host]:
-        selargs += ['service=%s' % args[0].decode('utf-8')]
-        del args[0]
-    return selargs
 
 
 def api(args):
@@ -180,7 +132,7 @@ def api(args):
     an integer exit code on failure.
 
     '''
-    global URL, NAGIOS
+    global URL
 
     # The rest of the data is now in args, build the URL
     verb = args[0]
@@ -357,197 +309,10 @@ def do_cancel_downtime(cmd, args, opts):
     return 0
 
 
-def do_disable_notifications(cmd, args, opts):
-    '''Disable notifications for a host or service. Usage:
+def match_hosts(cmd, args, opts):
+    critical("This feature is currently unsupported. Sorry about that.")
 
-        %prog disable-notifications <host> [service] [opts]
-
-    host must be a hostname that Nagios knows about. If specified,
-    service is a service that exists on that host.
-
-    Available options:
-
-        --recursive       Target the host and all services on this host.
-                          You must not specify a specific service.
-
-    Example:
-
-        %prog disable-notifications web01
-            # disable for for web01
-
-        %prog disable-notifications web01 "PING Check"
-            # disable for PING Check on web01
-
-        %prog disable-notifications web03 --recursive
-            # disable for web03 and ALL services on it
-
-    '''
-    p = OptionParser(usage=trim(do_disable_notifications.__doc__))
-    p.disable_interspersed_args()
-    p.add_option('-r', '--recursive', dest='recursive', action='store_true',
-        help='Disable for all services on the given host')
-    p.set_defaults(recursive=False, author=None, comment=None)
-
-    selargs = consume_host_service(args)
-    if selargs is None:
-        p.error('Failed to locate host/service to act on')
-
-    (options, args) = p.parse_args(opts)
-    if options.recursive:
-        selargs += ['services_too=true']
-
-    res = api(['disable_notifications'] + selargs)
-    if isinstance(res, int):
-        return res
-    if not isinstance(res, dict):
-        return critical('API returned unknown object type')
-    if not res['success']:
-        return critical('Failed: %s' % res['content'])
-    return 0
-
-
-def do_enable_notifications(cmd, args, opts):
-    '''Re-enable notifications for a host or service. Usage:
-
-        %prog enable-notifications <host> [service] [opts]
-
-    host must be a hostname that Nagios knows about. If specified,
-    service is a service that exists on that host.
-
-    Available options:
-
-        --recursive       Target the host and all services on this host.
-                          You must not specify a specific service.
-
-    Example:
-
-        %prog enable-notifications web01
-            # enable for for web01
-
-        %prog enable-notifications web01 "PING Check"
-            # enable for PING Check on web01
-
-        %prog enable-notifications web03 --recursive
-            # enable for web03 and ALL services on it
-
-    '''
-    p = OptionParser(usage=trim(do_enable_notifications.__doc__))
-    p.disable_interspersed_args()
-    p.add_option('-r', '--recursive', dest='recursive', action='store_true',
-        help='Enable for all services on the given host')
-    p.set_defaults(recursive=False, author=None, comment=None)
-
-    selargs = consume_host_service(args)
-    if selargs is None:
-        p.error('Failed to locate host/service to act on')
-
-    (options, args) = p.parse_args(opts)
-    if options.recursive:
-        selargs += ['services_too=true']
-
-    res = api(['enable_notifications'] + selargs)
-    if isinstance(res, int):
-        return res
-    if not isinstance(res, dict):
-        return critical('API returned unknown object type')
-    if not res['success']:
-        return critical('Failed: %s' % res['content'])
-    return 0
-
-def do_acknowledge_problem(cmd, args, opts):
-    '''Acknowledge problem for a host or service. Usage:
-
-        %prog acknowledge-problem <host> [service] --comment=TEXT [opts]
-
-    host must be a hostname that Nagios knows about. If specified,
-    service is a service that exists on that host. Comment must be specified.
-
-    Available options:
-
-        --comment=TEXT   	Comment on the acknowledged problem.
-
-        --sticky=TRUE/FALSE  	[defaults to TRUE] If sticky, an acknowledgement hangs around
-                                until a host reaches "OK" - otherwise, it goes away on next
-                                state change.
-
-        --notify=TRUE/FALSE	[defaults to TRUE] If TRUE, sends notification that an
-                                acknowledgement has occurred.
-
-        --persistent=TRUE/FALSE	[defaults to FALSE] If TRUE, the comment will remain after the
-                                host returns to "OK" state.
-
-        --author=STR		[defaults to "nagios-api"] Who is doing the acknowledging.
-
-    Example:
-
-        %prog acknowledge-problem web01 --comment="Critical Failure"
-            # acknowledge problem for web01 with comment "Critical Failure"
-
-        %prog acknowledge-problem web03 "HTTP" --comment="Critical Failure"
-            # acknowledge problem on HTTP service for web03 with comment "Critical Failure"
-
-    '''
-    defaults = CONFIG['ncli']['commenting']
-    p = OptionParser(usage=trim(do_acknowledge_problem.__doc__))
-    p.disable_interspersed_args()
-    p.add_option('-c', '--comment', dest='comment', action='store',
-        help="Comment on the acknowledged problem.")
-    p.add_option('-s', '--sticky', dest='sticky', action='store_false',
-        help='Does acknowledgement hang around until "OK" reached by host?')
-    p.add_option('-n', '--notify', dest='notify', action='store_false',
-        help='Should we send a notification of the acknowledgment?')
-    p.add_option('-p', '--persistent', dest='persistent', action='store_true',
-        help='Should the comment hang around after the problem expires?')
-    p.add_option('-a', '--author', dest='author', action='store',
-        help='Name appearing for who does the acknowledgment.')
-    p.set_defaults(
-            sticky=defaults['sticky'],
-            notify=defaults['notify'],
-            persistent=defaults['persistent'],
-            author=defaults['author']
-    )
-
-    selargs = consume_host_service(args)
-    if selargs is None:
-        p.error('Failed to locate host/service to act on')
-
-    (options, args) = p.parse_args(opts)
-    if options.comment:
-        selargs += ['comment=%s' % options.comment]
-    else:
-        return critical('Did not include comment when required!')
-    if options.sticky is not True:
-        selargs += ['sticky=FALSE']
-    if options.notify is not True:
-        selargs += ['notify=FALSE']
-    if options.persistent:
-        selargs += ['persistent=TRUE']
-    if options.author:
-        selargs += ['author=%s' % options.author]
-
-    res = api(['acknowledge_problem'] + selargs)
-    if isinstance(res, int):
-        return res
-    if not isinstance(res, dict):
-        return critical('API returned unknown object type')
-    if not res['success']:
-        return critical('Failed: %s' % res['content'])
-    return 0
-
-
-def do_hosts(cmd, args, opts):
-    '''Return a plain list of all hosts.
-
-    '''
-    global NAGIOS
-    for host in NAGIOS:
-        print host
-    return 0
-
-def match_services(cmd, args, opts):
-    print cmd
-    print args
-    print opts
+def match_services(args, opts):
     '''TODO
 
     '''
@@ -598,18 +363,23 @@ def match_services(cmd, args, opts):
         'show': action_show,
         'ack': action_acknowledge_services,
         'acknowledge': action_acknowledge_services,
+        'notify': action_notifications_services,
+        'notification': action_notifications_services,
+        'notifications': action_notifications_services,
+        'enable-notifications': action_enable_notifications_services,
+        'disable-notifications': action_disable_notifications_services,
     }
     for cmd in dispatch:
         if re.match(r'^' + command, cmd):
-            return dispatch[cmd](command, otherargs, service_matches)
+            return dispatch[cmd](otherargs, service_matches)
     p.error('Command not found, see the usage')
     return 0
 
-def action_show(cmd, opts, matches):
+def action_show(opts, matches):
     [ obj.pp() for obj in matches ]
 
-def action_acknowledge_services(cmd, opts, services):
-    '''Acknowledge problem for a host or service. Usage:
+def action_acknowledge_services(opts, services):
+    '''Acknowledge problem for a service. Usage:
         --comment=TEXT   	Comment on the acknowledged problem.
         --sticky=TRUE/FALSE  	[defaults to TRUE] If sticky, an acknowledgement hangs around
                                 until a host reaches "OK" - otherwise, it goes away on next
@@ -641,56 +411,75 @@ def action_acknowledge_services(cmd, opts, services):
     )
     (options, args) = p.parse_args(opts)
 
-    for svc in services:
-        post_args = ["host=%s" % svc.host]
-        post_args += ["service=%s" % svc.name]
-        if options.comment:
-            post_args += ['comment=%s' % options.comment]
-        else:
-            return critical('Did not include comment when required!')
-        #if options.sticky is not True:
-        post_args += ['sticky=0']
-        #if options.notify is not True:
-        post_args += ['notify=0']
-        #if options.persistent:
-        post_args += ['persistent=1']
-        if options.author:
-            post_args += ['author=%s' % options.author]
+    shared_args = []
+    if options.comment:
+        shared_args += ["comment=%s" % options.comment]
+    else:
+        return critical('Did not include comment when required!')
+    shared_args += ["sticky=%s" % int(options.sticky)]
+    shared_args += ["notify=%s" % int(options.notify)]
+    shared_args += ["persistent=%s" % int(options.persistent)]
+    if options.author:
+        shared_args += ['author=%s' % options.author]
 
-        print "Acknowledging with options=\"%s\"..." % (post_args)
-        res = api(['acknowledge_problem'] + post_args)
+    action = 'acknowledge_problem'
+    for svc in services:
+        post_args = shared_args[:]
+        post_args += ["host=%s" % svc.host]
+        post_args += ["service=%s" % svc.name]
+
+        print "Executing action \"%s\" with options=\"%s\"..." % (action, post_args)
+        res = api([action] + post_args)
+        if isinstance(res, int):
+            return res
+        if not isinstance(res, dict):
+            return critical("API returned unknown object type")
+        if not res["success"]:
+            return critical("Failed: %s" % res['content'])
+
+    invalidate_cache()
+    return 0
+
+def action_enable_notifications_services(opts, services):
+    action_notifications_services(['--enable'], services)
+def action_disable_notifications_services(opts, services):
+    action_notifications_services(['--disable'], services)
+
+def action_notifications_services(opts, services):
+    '''Enable/disable notifications for a service.
+        Available options:
+        -d, --disable     Disables notifications
+        -e, --enable      Enables notifications
+
+    '''
+    p = OptionParser(usage=trim(action_notifications_services.__doc__))
+    p.disable_interspersed_args()
+    p.add_option('-d', '--disable', dest='enable', action='store_false',
+        help='Disable notifications for service')
+    p.add_option('-e', '--enable', dest='enable', action='store_true',
+        help='Enable notifications for service')
+    p.set_defaults(enable=None)
+    (options, args) = p.parse_args(opts)
+    if options.enable == None:
+        p.error("The notify action requires you to add either --disable or --enable.")
+
+    action = 'enable_notifications' if options.enable else 'disable_notifications'
+    for svc in services:
+        post_args = [
+                "host=%s" % svc.host,
+                "service=%s" % svc.name
+        ]
+        print "Executing action \"%s\" with options=\"%s\"..." % (action, post_args)
+        res = api([action] + post_args)
         if isinstance(res, int):
             return res
         if not isinstance(res, dict):
             return critical('API returned unknown object type')
         if not res['success']:
             return critical('Failed: %s' % res['content'])
+
+    invalidate_cache()
     return 0
-
-
-
-def match_services_old(cmd, args, opts):
-    '''For a given host, return all services. Usage:
-
-        %prog services <host>
-
-    Specify the host you wish to view the services of.
-    '''
-    global NAGIOS
-    p = OptionParser(usage=trim(match_services.__doc__))
-    if len(args) <= 0 or args[0] not in NAGIOS:
-        p.error('First argument must be a valid hostname')
-    for svc in NAGIOS[args[0]]:
-        print svc
-    return 0
-
-
-def critical(msg, retval=1):
-    '''Print a message to STDERR and return a failure code.
-
-    '''
-    print >>sys.stderr, msg
-    return retval
 
 
 def do_raw(args):
@@ -714,6 +503,22 @@ def do_raw(args):
     else:
         print dumps(resobj['content'])
     return 0
+
+def critical(msg, retval=1):
+    '''Print a message to STDERR and return a failure code.
+
+    '''
+    print >>sys.stderr, msg
+    return retval
+
+def cache_path():
+    return "%s/cache.json" % path.dirname(path.realpath(__file__))
+
+def invalidate_cache():
+    try:
+        remove(cache_path())
+    except OSError:
+        pass
 
 
 
