@@ -13,6 +13,24 @@ invoke it, tell it what command to run, and then the rest of the
 arguments vary depending on the command. Some tools don't take any
 options, some take a few required arguments and then some.
 
+ncli [base options] [service match options] verb
+ncli: everything
+ncli -p: all problems
+ncli -h [match on hostname] -s [match on service description]: all matching services
+ncli -p -h [match on hostname] -s [match on service description]: all matching problematic services
+ncli -p -h [match on hostname] -s [match on service description] ack: begin acknowledgement of all matching problematic services
+ncli -p -h [match on hostname] -s [match on service description] comment: begin comment on all matching problematic services
+ncli [enable|disable]-notifications
+ncli [enable|disable]-event_handlers
+
+Actions:
+    show (default)
+    [enable|disable]-notifications
+    [enable|disable]-event-handlers
+    [enable|disable]-active-checks
+    reschedule-check
+
+
 Status Viewing
     ncli hosts
     ncli services <host>
@@ -41,9 +59,9 @@ import requests
 import sys
 import yaml
 from json import load, dump, loads, dumps
-from ncli_utils import Service, Host
+from ncli_utils import *
 from optparse import OptionParser, OptionGroup
-from os import path
+from os import path, remove
 from time import time
 
 
@@ -53,21 +71,87 @@ URL = None  # To the Nagios API "http://foo:6315"
 NAGIOS = {}  # Host => [ Service, Service, Service, ... ]
 
 
-
-
-def time_to_seconds(inp):
-    '''Possibly convert a time written like "2h" or "50m" into seconds.
+def main(argv):
+    '''Where the fun begins. Actually do something useful.
 
     '''
-    match = re.match(r'^(\d+)([wdhms])?$', inp)
-    if match is None:
-        return None
-    val, denom = match.groups()
-    if denom is None:
-        return int(val)
-    multiplier = {'w': 604800, 'd': 86400, 'h': 3600, 'm': 60, 's': 1}[denom]
-    return int(val) * multiplier
+    global CONFIG, NAGIOS, URL, STATE
 
+    config_path = "%s/config.yml" % path.dirname(path.realpath(__file__))
+    with open(config_path) as yml:
+        CONFIG = yaml.load(yml)
+    URL = "http://%s:%d" % (CONFIG['global']['host'], CONFIG['global']['port'])
+
+    # Parse out command line options
+    p = OptionParser(usage=trim(__doc__))
+    p.disable_interspersed_args()
+    p.add_option('--rf', '--refresh', dest='rf', action='store_true', help='Refresh cached status file')
+    p.add_option('--raw', dest='raw', action='store_true', help='Enable raw mode for the CLI')
+    (opts, args) = p.parse_args(argv[1:])
+
+    # If no more arguments, show usage
+    if len(args) <= 0:
+        args = ['services']
+
+    # If we're in raw mode, bail out for that now
+    if opts.raw:
+        return do_raw(args)
+
+    if opts.rf:
+        invalidate_cache()
+
+    if  path.isfile(cache_path()) and \
+            time() < path.getmtime(cache_path()) + CONFIG['ncli']['refresh_cache']:
+        with open(cache_path(), 'r') as cache:
+            STATE = load(cache)
+    else:
+        print 'Fetching status file...'
+        data = api(['state'])
+        if isinstance(data, dict):
+            if data['success']:
+                with open(cache_path(), 'w') as cache:
+                    STATE = data['content']
+                    dump(STATE, cache)
+                    print '-----------------------'
+            else:
+                return critical('Failed to load objects from nagios-api')
+
+    # args will now contain the subcommand, some positional arguments,
+    # and then the dashed options. Split them.
+    command, posargs, otherargs = args[0], [], []
+    for arg in args[1:]:
+        if len(otherargs) > 0:
+            otherargs.append(arg)
+            continue
+        if arg[0] == '-':
+            otherargs.append(arg)
+        else:
+            posargs.append(arg)
+
+    # Dispatch table and then dispatch
+    dispatch = {
+        'schedule-downtime': do_schedule_downtime,
+        'cancel-downtime': do_cancel_downtime,
+        'enable-notifications': do_enable_notifications,
+        'disable-notifications': do_disable_notifications,
+        'acknowledge-problem': do_acknowledge_problem,
+        'hosts': do_hosts,
+        'services': match_services,
+    }
+    for cmd in dispatch:
+        if re.match(r'^' + command, cmd):
+            return dispatch[cmd](command, posargs, otherargs)
+    p.error('Command not found, see the usage')
+
+
+def cache_path():
+    return "%s/cache.json" % path.dirname(path.realpath(__file__))
+
+def invalidate_cache():
+    try:
+        remove(cache_path())
+    except OSError:
+        pass
 
 def consume_host_service(args):
     '''Given a list of arguments, attempt to consume a host and service
@@ -453,16 +537,131 @@ def do_hosts(cmd, args, opts):
         print host
     return 0
 
-def do_problems(cmd, args, opts):
+def match_services(cmd, args, opts):
+    print cmd
+    print args
+    print opts
+    '''TODO
+
+    '''
     global STATE
+    p = OptionParser(add_help_option=False)
+    p.disable_interspersed_args()
+    p.add_option('-h', '--host', dest='host', action='store',
+            help="Only match services matching host regex.")
+    p.add_option('-p', '--problem', dest='problem', action='store_true',
+        help="Only match services that are in a non-OK state.")
+    p.add_option('-s', '--service', dest='service', action='store',
+        help="Only match services matching service regex.")
+    p.set_defaults(host=".*",service=".*",problem=False)
+    (options, args) = p.parse_args(opts)
+
+    service_matches = []
     for (hostname, hostdata) in STATE.iteritems():
         for (svcname, svcdata) in hostdata['services'].iteritems():
             svc = Service(svcname, svcdata, hostname)
-            if svc.current_state != 'OK':
-                svc.pp()
+            if options.problem and svc.current_state == 'OK':
+                continue
+            if re.match(options.host, svc.host.lower()) == None:
+                continue
+            if re.match(options.service, svc.name.lower()) == None:
+                continue
+            service_matches.append(svc)
+
+    if len(service_matches) < 1:
+        return critical("Could not find a service matching the conditions host:/%s/, service:/%s/, problem:%s" % (options.host, options.service, options.problem))
+
+    if len(args) < 1:
+        args = 'show'
+
+    # args will now contain the subcommand, some positional arguments,
+    # and then the dashed options. Split them.
+    command, posargs, otherargs = args[0], [], []
+    for arg in args[1:]:
+        if len(otherargs) > 0:
+            otherargs.append(arg)
+            continue
+        if arg[0] == '-':
+            otherargs.append(arg)
+        else:
+            posargs.append(arg)
+
+    # Dispatch table and then dispatch
+    dispatch = {
+        'show': action_show,
+        'ack': action_acknowledge_services,
+        'acknowledge': action_acknowledge_services,
+    }
+    for cmd in dispatch:
+        if re.match(r'^' + command, cmd):
+            return dispatch[cmd](command, otherargs, service_matches)
+    p.error('Command not found, see the usage')
     return 0
 
-def do_services(cmd, args, opts):
+def action_show(cmd, opts, matches):
+    [ obj.pp() for obj in matches ]
+
+def action_acknowledge_services(cmd, opts, services):
+    '''Acknowledge problem for a host or service. Usage:
+        --comment=TEXT   	Comment on the acknowledged problem.
+        --sticky=TRUE/FALSE  	[defaults to TRUE] If sticky, an acknowledgement hangs around
+                                until a host reaches "OK" - otherwise, it goes away on next
+                                state change.
+        --notify=TRUE/FALSE	[defaults to TRUE] If TRUE, sends notification that an
+                                acknowledgement has occurred.
+        --persistent=TRUE/FALSE	[defaults to FALSE] If TRUE, the comment will remain after the
+                                host returns to "OK" state.
+        --author=STR		[defaults to "nagios-api"] Who is doing the acknowledging.
+    '''
+    defaults = CONFIG['ncli']['commenting']
+    p = OptionParser(usage=trim(do_acknowledge_problem.__doc__))
+    p.disable_interspersed_args()
+    p.add_option('-c', '--comment', dest='comment', action='store',
+        help="Comment on the acknowledged problem.")
+    p.add_option('-s', '--sticky', dest='sticky', action='store_false',
+        help='Does acknowledgement hang around until "OK" reached by host?')
+    p.add_option('-n', '--notify', dest='notify', action='store_false',
+        help='Should we send a notification of the acknowledgment?')
+    p.add_option('-p', '--persistent', dest='persistent', action='store_true',
+        help='Should the comment hang around after the problem expires?')
+    p.add_option('-a', '--author', dest='author', action='store',
+        help='Name appearing for who does the acknowledgment.')
+    p.set_defaults(
+            sticky=defaults['sticky'],
+            notify=defaults['notify'],
+            persistent=defaults['persistent'],
+            author=defaults['author']
+    )
+    (options, args) = p.parse_args(opts)
+
+    for svc in services:
+        post_args = ["host=%s service=%s" % (svc.host, svc.name)]
+        if options.comment:
+            post_args += ['comment=%s' % options.comment]
+        else:
+            return critical('Did not include comment when required!')
+        if options.sticky is not True:
+            post_args += ['sticky=FALSE']
+        if options.notify is not True:
+            post_args += ['notify=FALSE']
+        if options.persistent:
+            post_args += ['persistent=TRUE']
+        if options.author:
+            post_args += ['author=%s' % options.author]
+
+        print "Acknowledging with options=\"%s\"..." % (post_args)
+        res = api(['acknowledge_problem'] + post_args)
+        if isinstance(res, int):
+            return res
+        if not isinstance(res, dict):
+            return critical('API returned unknown object type')
+        if not res['success']:
+            return critical('Failed: %s' % res['content'])
+    return 0
+
+
+
+def match_services_old(cmd, args, opts):
     '''For a given host, return all services. Usage:
 
         %prog services <host>
@@ -470,7 +669,7 @@ def do_services(cmd, args, opts):
     Specify the host you wish to view the services of.
     '''
     global NAGIOS
-    p = OptionParser(usage=trim(do_services.__doc__))
+    p = OptionParser(usage=trim(match_services.__doc__))
     if len(args) <= 0 or args[0] not in NAGIOS:
         p.error('First argument must be a valid hostname')
     for svc in NAGIOS[args[0]]:
@@ -508,111 +707,6 @@ def do_raw(args):
         print dumps(resobj['content'])
     return 0
 
-
-def trim(docstring):
-    '''This is taken from PEP 257 for docstring usage. I'm duplicating
-    it here so I can use it to preparse docstrings before sending them
-    to OptionParser. Otherwise, I can either not indent my docstrings
-    (in violation of the PEP) or I can have the usage outputs be
-    indented.
-
-    '''
-    if not docstring:
-        return ''
-    # Convert tabs to spaces (following the normal Python rules)
-    # and split into a list of lines:
-    lines = docstring.expandtabs().splitlines()
-    # Determine minimum indentation (first line doesn't count):
-    indent = sys.maxint
-    for line in lines[1:]:
-        stripped = line.lstrip()
-        if stripped:
-            indent = min(indent, len(line) - len(stripped))
-    # Remove indentation (first line is special):
-    trimmed = [lines[0].strip()]
-    if indent < sys.maxint:
-        for line in lines[1:]:
-            trimmed.append(line[indent:].rstrip())
-    # Strip off trailing and leading blank lines:
-    while trimmed and not trimmed[-1]:
-        trimmed.pop()
-    while trimmed and not trimmed[0]:
-        trimmed.pop(0)
-    # Return a single string:
-    return '\n'.join(trimmed)
-
-
-def main(argv):
-    '''Where the fun begins. Actually do something useful.
-
-    '''
-    global CONFIG, NAGIOS, URL, STATE
-    config_path = "%s/config.yml" % path.dirname(path.realpath(__file__))
-    cache_path = "%s/cache.json" % path.dirname(path.realpath(__file__))
-
-    with open(config_path) as yml:
-        CONFIG = yaml.load(yml)
-    URL = "http://%s:%d" % (CONFIG['global']['host'], CONFIG['global']['port'])
-
-    # Parse out command line options
-    p = OptionParser(usage=trim(__doc__))
-    p.disable_interspersed_args()
-    p.add_option('--rf', '--refresh', dest='rf', action='store_true', help='Refresh cached status file')
-    p.add_option('--raw', dest='raw', action='store_true', help='Enable raw mode for the CLI')
-    (opts, args) = p.parse_args(argv[1:])
-
-    # If no more arguments, show usage
-    if len(args) <= 0:
-        p.error('No command specified')
-
-    # If we're in raw mode, bail out for that now
-    if opts.raw:
-        return do_raw(args)
-
-    if not opts.rf                  and \
-            path.isfile(cache_path) and \
-            time() < path.getmtime(cache_path) + CONFIG['ncli']['refresh_cache']:
-        print 'Loading cached status file...'
-        with open(cache_path, 'r') as cache:
-            STATE = load(cache)
-    else:
-        print 'Cached status file expired or not found. Refreshing...'
-        data = api(['state'])
-        if isinstance(data, dict):
-            if data['success']:
-                with open(cache_path, 'w') as cache:
-                    STATE = data['content']
-                    dump(STATE, cache)
-            else:
-                return critical('Failed to load objects from nagios-api')
-
-    # args will now contain the subcommand, some positional arguments,
-    # and then the dashed options. Split them.
-    command, posargs, otherargs = args[0], [], []
-    for arg in args[1:]:
-        if len(otherargs) > 0:
-            otherargs.append(arg)
-            continue
-        if arg[0] == '-':
-            otherargs.append(arg)
-        else:
-            posargs.append(arg)
-
-    # Dispatch table and then dispatch
-    dispatch = {
-        'schedule-downtime': do_schedule_downtime,
-        'cancel-downtime': do_cancel_downtime,
-        'enable-notifications': do_enable_notifications,
-        'disable-notifications': do_disable_notifications,
-        'acknowledge-problem': do_acknowledge_problem,
-        'hosts': do_hosts,
-        'services': do_services,
-        'problems': do_problems,
-    }
-    for cmd in dispatch:
-        if re.match(r'^' + command, cmd):
-            return dispatch[cmd](command, posargs, otherargs)
-    p.error('Command not found, see the usage')
 
 
 if __name__ == '__main__':

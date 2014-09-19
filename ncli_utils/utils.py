@@ -1,12 +1,67 @@
 #!/usr/bin/python
-import json
+
+import sys
+
+
+def time_to_seconds(inp):
+    '''Possibly convert a time written like "2h" or "50m" into seconds.
+
+    '''
+    match = re.match(r'^(\d+)([wdhms])?$', inp)
+    if match is None:
+        return None
+    val, denom = match.groups()
+    if denom is None:
+        return int(val)
+    multiplier = {'w': 604800, 'd': 86400, 'h': 3600, 'm': 60, 's': 1}[denom]
+    return int(val) * multiplier
+
+def trim(docstring):
+    '''This is taken from PEP 257 for docstring usage. I'm duplicating
+    it here so I can use it to preparse docstrings before sending them
+    to OptionParser. Otherwise, I can either not indent my docstrings
+    (in violation of the PEP) or I can have the usage outputs be
+    indented.
+
+    '''
+    if not docstring:
+        return ''
+    # Convert tabs to spaces (following the normal Python rules)
+    # and split into a list of lines:
+    lines = docstring.expandtabs().splitlines()
+    # Determine minimum indentation (first line doesn't count):
+    indent = sys.maxint
+    for line in lines[1:]:
+        stripped = line.lstrip()
+        if stripped:
+            indent = min(indent, len(line) - len(stripped))
+    # Remove indentation (first line is special):
+    trimmed = [lines[0].strip()]
+    if indent < sys.maxint:
+        for line in lines[1:]:
+            trimmed.append(line[indent:].rstrip())
+    # Strip off trailing and leading blank lines:
+    while trimmed and not trimmed[-1]:
+        trimmed.pop()
+    while trimmed and not trimmed[0]:
+        trimmed.pop(0)
+    # Return a single string:
+    return '\n'.join(trimmed)
+
+
 def status_to_s(state):
     status_map = {"0": "OK", "1": "WARN", "2": "CRIT", "3": "UNK"}
     return status_map[state]
 
 class HostOrService:
+    attrs = ['current_state', 'plugin_output',
+            'notifications_enabled', 'last_check', 'last_notification',
+            'active_checks_enabled', 'problem_has_been_acknowledged',
+            'last_hard_state', 'scheduled_downtime_depth', 'performance_data',
+            'last_state_change', 'current_attempt', 'max_attempts']
+
     def __init__(self, name, attributes):
-        self.name = name
+        self.name = name.decode('utf-8')
         self.current_state = status_to_s(attributes['current_state'])
         self.plugin_output = attributes['plugin_output']
         self.notifications_enabled = attributes['notifications_enabled']
@@ -32,7 +87,7 @@ class Host(HostOrService):
 class Service(HostOrService):
     def __init__(self, name, attributes, host = None):
         HostOrService.__init__(self, name, attributes)
-        self.host = host
+        self.host = host.decode('utf-8')
     def attach_host(self, host):
         '''Attach a Service to this Host.'''
         self.host = host
