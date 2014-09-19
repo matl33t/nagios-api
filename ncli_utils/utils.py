@@ -62,27 +62,17 @@ def status_to_s(state):
     return status_map[state]
 
 class HostOrService:
-    attrs = ['current_state', 'plugin_output',
+    req_attrs = ['current_state', 'plugin_output',
             'notifications_enabled', 'last_check', 'last_notification',
             'active_checks_enabled', 'problem_has_been_acknowledged',
             'last_hard_state', 'scheduled_downtime_depth', 'performance_data',
             'last_state_change', 'current_attempt', 'max_attempts']
 
     def __init__(self, name, attributes):
-        self.name = name.decode('utf-8')
+        self.name = name.decode('utf-8') #TODO not sure if necessary
+        for attr in self.req_attrs:
+            setattr(self, attr, attributes[attr])
         self.current_state = status_to_s(attributes['current_state'])
-        self.plugin_output = attributes['plugin_output']
-        self.notifications_enabled = attributes['notifications_enabled']
-        self.last_check = attributes['last_check']
-        self.last_notification = attributes['last_notification']
-        self.active_checks_enabled = attributes['active_checks_enabled']
-        self.problem_has_been_acknowledged = attributes['problem_has_been_acknowledged']
-        self.last_hard_state = attributes['last_hard_state']
-        self.scheduled_downtime_depth = attributes['scheduled_downtime_depth']
-        self.performance_data = attributes['performance_data']
-        self.last_state_change = attributes['last_state_change']
-        self.current_attempt = attributes['current_attempt']
-        self.max_attempts = attributes['max_attempts']
 
 class Host(HostOrService):
     def __init__(self, name, attributes):
@@ -90,17 +80,12 @@ class Host(HostOrService):
         self.services = {}
 
     def attach_service(self, svc):
-        '''Attach a Service to this Host.'''
         self.services[svc.service] = svc
 
 class Service(HostOrService):
     def __init__(self, name, attributes, host = None):
         HostOrService.__init__(self, name, attributes)
         self.host = host.decode('utf-8')
-
-    def attach_host(self, host):
-        '''Attach a Service to this Host.'''
-        self.host = host
 
     def pp(self, opts = None):
         color = None
@@ -123,6 +108,4 @@ class Service(HostOrService):
 
     def xp(self, opts = None):
         pass
-
-
 
