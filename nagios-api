@@ -15,13 +15,14 @@ contributors. See the LICENSE file for full licensing information.
 '''
 
 
+import atexit
 import datetime
 import os
 import re
 import sys
 import time
 import types
-import atexit
+import yaml
 from gzip import GzipFile
 from StringIO import StringIO
 from optparse import OptionParser
@@ -130,7 +131,7 @@ def http_host(req, objid, reqobj):
     for host_key in host_keys:
         value = getattr(NAGIOS.hosts[objid], host_key)
         if type(value) == types.StringType:
-            ret[host_key] = value 
+            ret[host_key] = value
         # return comment and downtime data too, if either exists
         elif type(value) == dict:
             for k, v in value.iteritems():
@@ -276,7 +277,7 @@ def http_schedule_downtime(req, objid, reqobj):
     except ValueError:
         dur = 0
     end_time = reqobj.get('end_time', start_time + dur)
-    
+
     obj = NAGIOS.host_or_service(host, service)
     if obj is None:
         return json_error(req, 'Host or service not found.')
@@ -335,7 +336,7 @@ def http_cancel_downtime(req, objid, reqobj):
     for dt in dts:
         if res is None:
             res = True  # So we know if we found any.
-        res = cancel_downtime(dt) and res        
+        res = cancel_downtime(dt) and res
 
     if res is not None:
         if res:
@@ -348,7 +349,7 @@ def http_cancel_downtime(req, objid, reqobj):
 
 
 def http_schedule_hostgroup_downtime(req, objid, reqobj):
-    '''Given a hostgroup, schedule downtime for all the hosts in the hostgroup. 
+    '''Given a hostgroup, schedule downtime for all the hosts in the hostgroup.
     The main mode for this API is to schedule a hard downtime that starts now and ends
     after so many seconds.
 
@@ -375,7 +376,7 @@ def http_schedule_hostgroup_downtime(req, objid, reqobj):
     except ValueError:
         dur = 0
     end_time = reqobj.get('end_time', start_time + dur)
-    
+
     if hostgroup is None:
         return json_error(req, 'Hostgroup not specified.')
     if dur < 60 or dur > 86400 * 7:  # Upper limit?
@@ -466,7 +467,7 @@ def http_acknowledge_problem(req, objid, reqobj):
 
     author (string): This is the name displayed as the creator of the
     acknowledgement. This will default to 'nagios-api'.
-    
+
     '''
     global NAGIOS, CMD_ENABLED
     if not CMD_ENABLED:
@@ -495,7 +496,7 @@ def http_acknowledge_problem(req, objid, reqobj):
         return json_error(req, 'Invalid value provided for one or more of sticky, notify or persistent')
 
     if obj.service is not None:
-        if not send_nagios_command('ACKNOWLEDGE_SVC_PROBLEM', host, service, 
+        if not send_nagios_command('ACKNOWLEDGE_SVC_PROBLEM', host, service,
                                     sticky, notify, persistent, author, comment):
             return json_error(req, 'Failed sending command to Nagios.')
     else:
@@ -552,7 +553,7 @@ def http_add_comment(req, objid, reqobj):
 
     author (string): This is the name displayed as the creator of the
     comment. This will default to 'nagios-api'.
-    
+
     '''
     global NAGIOS, CMD_ENABLED
     if not CMD_ENABLED:
@@ -577,7 +578,7 @@ def http_add_comment(req, objid, reqobj):
         return json_error(req, 'Invalid value provided for persistent')
 
     if obj.service is not None:
-        if not send_nagios_command('ADD_SVC_COMMENT', host, service, 
+        if not send_nagios_command('ADD_SVC_COMMENT', host, service,
                                     persistent, author, comment):
             return json_error(req, 'Failed sending command to Nagios.')
     else:
@@ -863,22 +864,27 @@ def main(argv):
     global CMDFILE, CMD_ENABLED, LOG_ENABLED, ALLOW_ORIGIN, PID_FILE
     app = Application()
 
+    config_path = "%s/config.yml" % os.path.dirname(os.path.realpath(__file__))
+    configs = None
+    with open(config_path) as yml:
+        configs = yaml.load(yml)
+
     parser = OptionParser(description='Give Nagios a REST API.')
     parser.add_option('-o', '--allow-origin', dest='alloworigin', metavar='ORIGIN',
             help='Access-Control-Allow-Origin header contents')
     parser.add_option('-s', '--status-file', dest='statusfile', metavar='FILE',
-            default='/var/cache/nagios3/status.dat', help='The file that contains '
+            default=configs['nagios-api']['status'], help='The file that contains '
             'the Nagios status.')
     parser.add_option('-c', '--command-file', dest='commandfile', metavar='FILE',
-            default='/var/lib/nagios3/rw/nagios.cmd', help='The file to write '
+            default=configs['nagios-api']['cmd'], help='The file to write '
             'Nagios commands to.')
     parser.add_option('-l', '--log-file', dest='logfile', metavar='FILE',
-            default='/var/log/nagios3/nagios.log', help='The file Nagios writes '
+            default=configs['nagios-api']['log'], help='The file Nagios writes '
             'log events to.')
     parser.add_option('-b', '--bind', dest='bind_addr', metavar='ADDR',
             default='', help='The address to listen for requests on.')
     parser.add_option('-p', '--port', dest='port', metavar='PORT', type='int',
-            default=6315, help='The port to listen for requests on.')
+            default=configs['global']['port'], help='The port to listen for requests on.')
     parser.add_option('-f', '--pid-file', dest='pid_file', metavar='PID_FILE',
             default=PID_FILE, help='File to write pid to')
     parser.add_option('-q', '--quiet', dest='quiet', action='store_true',

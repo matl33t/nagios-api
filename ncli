@@ -28,10 +28,15 @@ Usage:
 
     Actions:
         show (default)
+        acknowledge
         [enable|disable]-notifications
+
+        WIP
         [enable|disable]-event-handlers
         [enable|disable]-active-checks
         reschedule-check
+        global [enable|disable]-notifications
+        global [enable|disable]-event-handlers
 
 Copyright 2011-2013 by Bump Technologies, Inc and other authors and
 contributors. See the LICENSE file for full licensing information.
@@ -309,7 +314,7 @@ def do_cancel_downtime(cmd, args, opts):
     return 0
 
 
-def match_hosts(cmd, args, opts):
+def match_hosts(args, opts):
     critical("This feature is currently unsupported. Sorry about that.")
 
 def match_services(args, opts):
@@ -334,9 +339,9 @@ def match_services(args, opts):
             svc = Service(svcname, svcdata, hostname)
             if options.problem and svc.current_state == 'OK':
                 continue
-            if re.match(options.host, svc.host.lower()) == None:
+            if re.search(options.host, svc.host.lower()) == None:
                 continue
-            if re.match(options.service, svc.name.lower()) == None:
+            if re.search(options.service, svc.name.lower()) == None:
                 continue
             service_matches.append(svc)
 
@@ -508,7 +513,7 @@ def critical(msg, retval=1):
     '''Print a message to STDERR and return a failure code.
 
     '''
-    print >>sys.stderr, msg
+    print >>sys.stderr, txtcolor.CRIT + msg + txtcolor.ENDC
     return retval
 
 def cache_path():

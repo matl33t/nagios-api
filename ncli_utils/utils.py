@@ -2,6 +2,14 @@
 
 import sys
 
+class txtcolor:
+    LBLUE = '\033[96m'
+    DBLUE = '\033[94m'
+    OK = '\033[92m'
+    WARN = '\033[93m'
+    CRIT = '\033[91m'
+    UNK = '\033[95m'
+    ENDC = '\033[0m'
 
 def time_to_seconds(inp):
     '''Possibly convert a time written like "2h" or "50m" into seconds.
@@ -80,6 +88,7 @@ class Host(HostOrService):
     def __init__(self, name, attributes):
         HostOrService.__init__(self, name, attributes)
         self.services = {}
+
     def attach_service(self, svc):
         '''Attach a Service to this Host.'''
         self.services[svc.service] = svc
@@ -88,17 +97,32 @@ class Service(HostOrService):
     def __init__(self, name, attributes, host = None):
         HostOrService.__init__(self, name, attributes)
         self.host = host.decode('utf-8')
+
     def attach_host(self, host):
         '''Attach a Service to this Host.'''
         self.host = host
+
     def pp(self, opts = None):
-        print "%s\t%s\t%s\t%s\t%s\t%s" % (
+        color = None
+        if self.current_state == 'CRIT':
+            color = txtcolor.CRIT
+        elif self.current_state == 'WARN':
+            color = txtcolor.WARN
+        elif self.current_state == 'UNK':
+            color = txtcolor.UNK
+        else:
+            color = txtcolor.OK
+        print color + "%s\t%s\t%s\t%s\t%s\t%s" % (
           self.host.ljust(25),
           self.name[:35].ljust(35),
           self.plugin_output[:35].ljust(35),
           self.current_state,
           self.problem_has_been_acknowledged == "1" and "ACK" or " ",
           self.notifications_enabled == "1" and " " or "MUTED",
-        )
+        ) + txtcolor.ENDC
+
+    def xp(self, opts = None):
+        pass
+
 
 
