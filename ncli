@@ -341,7 +341,7 @@ def match_services(args, opts):
                 continue
             if re.search(options.host, svc.host.lower()) == None:
                 continue
-            if re.search(options.service, svc.name.lower()) == None:
+            if re.search(options.service, svc.name.lower()) == None and re.search(options.service, svc.name) == None:
                 continue
             service_matches.append(svc)
 
@@ -373,12 +373,16 @@ def match_services(args, opts):
         'notifications': action_notifications_services,
         'enable-notifications': action_enable_notifications_services,
         'disable-notifications': action_disable_notifications_services,
+        'schedule': action_schedule_check_services,
+        'schedule-check': action_schedule_check_services,
+        'schedule-checks': action_schedule_check_services,
     }
     for cmd in dispatch:
-        if re.match(r'^' + command, cmd):
+        if re.match(r"^%s$" % command, cmd):
             return dispatch[cmd](otherargs, service_matches)
-    p.error('Command not found, see the usage')
-    return 0
+    return action_show(otherargs, service_matches)
+    #p.error('Command not found, see the usage')
+    #return 0
 
 def action_show(opts, matches):
     '''Displays information for services. Usage:
@@ -396,6 +400,41 @@ def action_show(opts, matches):
     else:
         [ obj.pp() for obj in matches ]
     return 0
+
+def action_schedule_check_services(opts, services):
+    '''Schedules services to be checked again immediately.
+
+    '''
+    p = OptionParser(usage=trim(action_acknowledge_services.__doc__))
+    p.disable_interspersed_args()
+    p.add_option('-t', '--time', dest='time', action='store',
+        help="Unsupported, defaults to current time.")
+    (options, args) = p.parse_args(opts)
+    for svc in services:
+        post_args = ["host=%s" % svc.host]
+        post_args += ["service=%s" % svc.name]
+        execute_action('schedule_check', post_args)
+
+    invalidate_cache()
+    return 0
+
+
+def execute_action_services(services, action, shared_args=[]):
+    for svc in services:
+        post_args = shared_args[:]
+        post_args += ["host=%s" % svc.host]
+        post_args += ["service=%s" % svc.name]
+        execute_action(action, post_args)
+
+def execute_action(action, post_args):
+    print "Executing action \"%s\" with options=\"%s\"..." % (action, post_args)
+    res = api([action] + post_args)
+    if isinstance(res, int):
+        return res
+    if not isinstance(res, dict):
+        return critical("API returned unknown object type")
+    if not res["success"]:
+        return critical("Failed: %s" % res['content'])
 
 def action_acknowledge_services(opts, services):
     '''Acknowledge problem for a service. Usage:
@@ -442,21 +481,7 @@ def action_acknowledge_services(opts, services):
     if options.author:
         shared_args += ['author=%s' % options.author]
 
-    action = 'acknowledge_problem'
-    for svc in services:
-        post_args = shared_args[:]
-        post_args += ["host=%s" % svc.host]
-        post_args += ["service=%s" % svc.name]
-
-        print "Executing action \"%s\" with options=\"%s\"..." % (action, post_args)
-        res = api([action] + post_args)
-        if isinstance(res, int):
-            return res
-        if not isinstance(res, dict):
-            return critical("API returned unknown object type")
-        if not res["success"]:
-            return critical("Failed: %s" % res['content'])
-
+    execute_action_services(services, 'acknowledge_problem', shared_args)
     invalidate_cache()
     return 0
 
@@ -484,20 +509,7 @@ def action_notifications_services(opts, services):
         p.error("The notify action requires you to add either --disable or --enable.")
 
     action = 'enable_notifications' if options.enable else 'disable_notifications'
-    for svc in services:
-        post_args = [
-                "host=%s" % svc.host,
-                "service=%s" % svc.name
-        ]
-        print "Executing action \"%s\" with options=\"%s\"..." % (action, post_args)
-        res = api([action] + post_args)
-        if isinstance(res, int):
-            return res
-        if not isinstance(res, dict):
-            return critical('API returned unknown object type')
-        if not res['success']:
-            return critical('Failed: %s' % res['content'])
-
+    execute_action_services(services, action)
     invalidate_cache()
     return 0
 
