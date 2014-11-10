@@ -415,9 +415,9 @@ def action_acknowledge_services(opts, services):
     p.disable_interspersed_args()
     p.add_option('-c', '--comment', dest='comment', action='store',
         help="Comment on the acknowledged problem.")
-    p.add_option('-s', '--sticky', dest='sticky', action='store_false',
+    p.add_option('-s', '--sticky', dest='sticky', action='store_true',
         help='Does acknowledgement hang around until "OK" reached by host?')
-    p.add_option('-n', '--notify', dest='notify', action='store_false',
+    p.add_option('-n', '--notify', dest='notify', action='store_true',
         help='Should we send a notification of the acknowledgment?')
     p.add_option('-p', '--persistent', dest='persistent', action='store_true',
         help='Should the comment hang around after the problem expires?')
