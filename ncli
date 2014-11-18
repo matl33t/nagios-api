@@ -25,16 +25,18 @@ Usage:
     ncli services -ph staging-15 -s unicorn ack --comment "fixing this"
                         Acknowledges all problematic services with host containing staging-15 and
                         description containing unicorn with provided comment and the default settings from config.yml
+    ncli services -ph lb12 schedule
+                        Schedules all services on lb12 to be rechecked immediately
 
     Actions:
         show (default)
-        acknowledge
+        (ack)nowledge
         [enable|disable]-notifications
+        schedule(-check)
 
         WIP
         [enable|disable]-event-handlers
         [enable|disable]-active-checks
-        reschedule-check
         global [enable|disable]-notifications
         global [enable|disable]-event-handlers
 
@@ -348,12 +350,10 @@ def match_services(args, opts):
     if len(service_matches) < 1:
         return critical("Could not find a service matching the conditions host:/%s/, service:/%s/, problem:%s" % (options.host, options.service, options.problem))
 
-    if len(args) < 1:
-        args = 'show'
-
     # args will now contain the subcommand, some positional arguments,
     # and then the dashed options. Split them.
-    command, posargs, otherargs = args[0], [], []
+    command = args[0] if len(args) > 0 else 'show'
+    posargs, otherargs = [], []
     for arg in args[1:]:
         if len(otherargs) > 0:
             otherargs.append(arg)
@@ -380,6 +380,7 @@ def match_services(args, opts):
     for cmd in dispatch:
         if re.match(r"^%s$" % command, cmd):
             return dispatch[cmd](otherargs, service_matches)
+    p.error('Command not found, defaulting to "show". See the usage.')
     return action_show(otherargs, service_matches)
     #p.error('Command not found, see the usage')
     #return 0
