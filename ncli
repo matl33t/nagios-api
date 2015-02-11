@@ -123,8 +123,6 @@ def main(argv):
 
     # Dispatch table and then dispatch
     dispatch = {
-        'schedule-downtime': do_schedule_downtime,
-        'cancel-downtime': do_cancel_downtime,
         'services': match_services,
         'hosts': match_hosts,
     }
@@ -185,139 +183,9 @@ def api(args):
     return resobj
 
 
-def do_schedule_downtime(cmd, args, opts):
-    '''Create a scheduled downtime for a host or service. Usage:
-
-        %prog schedule-downtime <host> [service] <duration> [opts]
-
-    host must be a hostname that Nagios knows about. If specified,
-    service is a service that exists on that host. This combination of
-    host and optional service indicates what you want the downtime to be
-    scheduled on.
-
-    The duration must be of the format like "2h". You can use w, d, h,
-    m, or s as units. Seconds are assumed if you don't specify the units.
-
-    Available options:
-
-        --recursive       Schedule downtime for all services on this host.
-                          You must not specify a specific service.
-
-        --author=NAME     Specify an author to record this downtime for.
-
-        --comment=TEXT    Leave descriptive text about the downtime.
-
-    Example:
-
-        %prog schedule-downtime web01 2h
-            # schedule two hours of downtime for web01
-
-        %prog schedule-downtime web01 "PING Check" 1w
-            # schedule one week of downtime for PING Check on web01
-
-        %prog schedule-downtime web03 1d --recursive
-            # schedule one day of downtime for web03 and ALL services on it
-
-    NOTE: This command schedules a fixed downtime that starts
-    immediately and lasts for the specified duration.
-
-    '''
-    p = OptionParser(usage=trim(do_schedule_downtime.__doc__))
-    p.disable_interspersed_args()
-    p.add_option('-a', '--author', dest='author', metavar='NAME',
-        help='Author to blame for this downtime')
-    p.add_option('-c', '--comment', dest='comment', metavar='TEXT',
-        help='Explanatory comment to leave on the downtime')
-    p.add_option('-r', '--recursive', dest='recursive', action='store_true',
-        help='Schedule for all services on the given host')
-    p.set_defaults(recursive=False, author=None, comment=None)
-
-    selargs = consume_host_service(args)
-    if selargs is None:
-        p.error('Failed to locate host/service to schedule downtime for')
-    if len(args) <= 0:
-        p.error('Must specify a duration in a format like "2h"')
-    secs = time_to_seconds(args[0])
-    if secs is None:
-        p.error('Invalid duration, must be in a format like "2h"')
-    selargs += ['duration=%d' % secs]
-
-    (options, args) = p.parse_args(opts)
-    if options.recursive:
-        selargs += ['services_too=true']
-    if options.author is not None:
-        selargs += ['author=%s' % options.author]
-    if options.comment is not None:
-        selargs += ['comment=%s' % options.comment]
-
-    res = api(['schedule_downtime'] + selargs)
-    if isinstance(res, int):
-        return res
-    if not isinstance(res, dict):
-        return critical('API returned unknown object type')
-    if not res['success']:
-        return critical('Failed: %s' % res['content'])
-    return 0
-
-
-def do_cancel_downtime(cmd, args, opts):
-    '''Cancel a scheduled downtime for a host or service. Usage:
-
-        %prog cancel-downtime <host> [service] [opts]
-
-    host must be a hostname that Nagios knows about. If specified,
-    service is a service that exists on that host. This combination of
-    host and optional service indicates what you want the downtime to be
-    cancelled from.
-
-    Available options:
-
-        --recursive       Cancel downtime for all services on this host.
-                          You must not specify a specific service.
-
-    Example:
-
-        %prog cancel-downtime web01
-            # cancel downtime for web01
-
-        %prog cancel-downtime web01 "PING Check"
-            # cancel downtime for PING Check on web01
-
-        %prog cancel-downtime web03 --recursive
-            # cancel downtime for web03 and ALL services on it
-
-    NOTE: If you have just scheduled the downtime through the API, note
-    that it may take a little while before you can cancel it. Nagios
-    is not instant and it may not write out the status file (with the
-    downtime id) for some time.
-
-    '''
-    p = OptionParser(usage=trim(do_cancel_downtime.__doc__))
-    p.disable_interspersed_args()
-    p.add_option('-r', '--recursive', dest='recursive', action='store_true',
-        help='Cancel for all services on the given host')
-    p.set_defaults(recursive=False, author=None, comment=None)
-
-    selargs = consume_host_service(args)
-    if selargs is None:
-        p.error('Failed to locate host/service to cancel downtime for')
-
-    (options, args) = p.parse_args(opts)
-    if options.recursive:
-        selargs += ['services_too=true']
-
-    res = api(['cancel_downtime'] + selargs)
-    if isinstance(res, int):
-        return res
-    if not isinstance(res, dict):
-        return critical('API returned unknown object type')
-    if not res['success']:
-        return critical('Failed: %s' % res['content'])
-    return 0
-
-
 def match_hosts(args, opts):
     critical("This feature is currently unsupported. Sorry about that.")
+
 
 def match_services(args, opts):
     '''TODO
@@ -327,11 +195,11 @@ def match_services(args, opts):
     p = OptionParser(add_help_option=False)
     p.disable_interspersed_args()
     p.add_option('-h', '--host', dest='host', action='store',
-            help="Only match services matching host regex.")
+            help='Only match services matching host regex.')
     p.add_option('-p', '--problem', dest='problem', action='store_true',
-        help="Only match services that are in a non-OK state.")
+        help='Only match services that are in a non-OK state.')
     p.add_option('-s', '--service', dest='service', action='store',
-        help="Only match services matching service regex.")
+        help='Only match services matching service regex.')
     p.set_defaults(host=".*",service=".*",problem=False)
     (options, args) = p.parse_args(opts)
 
@@ -341,9 +209,9 @@ def match_services(args, opts):
             svc = Service(svcname, svcdata, hostname)
             if options.problem and svc.current_state == 'OK':
                 continue
-            if re.search(options.host, svc.host.lower()) == None:
+            if re.search(options.host, svc.host.lower()) is None:
                 continue
-            if re.search(options.service, svc.name.lower()) == None and re.search(options.service, svc.name) == None:
+            if re.search(options.service, svc.name.lower()) is None and re.search(options.service, svc.name) is None:
                 continue
             service_matches.append(svc)
 
@@ -376,14 +244,16 @@ def match_services(args, opts):
         'schedule': action_schedule_check_services,
         'schedule-check': action_schedule_check_services,
         'schedule-checks': action_schedule_check_services,
+        'schedule-downtime': action_schedule_downtime,
+        'downtime': action_schedule_downtime,
+        'cancel-downtime': action_cancel_downtime
     }
     for cmd in dispatch:
         if re.match(r"^%s$" % command, cmd):
             return dispatch[cmd](otherargs, service_matches)
     p.error('Command not found, defaulting to "show". See the usage.')
     return action_show(otherargs, service_matches)
-    #p.error('Command not found, see the usage')
-    #return 0
+
 
 def action_show(opts, matches):
     '''Displays information for services. Usage:
@@ -402,23 +272,6 @@ def action_show(opts, matches):
         [ obj.pp() for obj in matches ]
     return 0
 
-def action_schedule_check_services(opts, services):
-    '''Schedules services to be checked again immediately.
-
-    '''
-    p = OptionParser(usage=trim(action_acknowledge_services.__doc__))
-    p.disable_interspersed_args()
-    p.add_option('-t', '--time', dest='time', action='store',
-        help="Unsupported, defaults to current time.")
-    (options, args) = p.parse_args(opts)
-    for svc in services:
-        post_args = ["host=%s" % svc.host]
-        post_args += ["service=%s" % svc.name]
-        execute_action('schedule_check', post_args)
-
-    invalidate_cache()
-    return 0
-
 
 def execute_action_services(services, action, shared_args=[]):
     for svc in services:
@@ -427,8 +280,9 @@ def execute_action_services(services, action, shared_args=[]):
         post_args += ["service=%s" % svc.name]
         execute_action(action, post_args)
 
+
 def execute_action(action, post_args):
-    print "Executing action \"%s\" with options=\"%s\"..." % (action, post_args)
+    print "Executing \"%s\" with options=\"%s\"..." % (action, post_args)
     res = api([action] + post_args)
     if isinstance(res, int):
         return res
@@ -437,24 +291,43 @@ def execute_action(action, post_args):
     if not res["success"]:
         return critical("Failed: %s" % res['content'])
 
+
+def action_schedule_check_services(opts, services):
+    '''Schedules services to be checked again immediately. Usage:
+        -t, --time=STR  Unsupported option. Defaults to current time.
+
+    '''
+    p = OptionParser(usage=trim(action_acknowledge_services.__doc__))
+    p.disable_interspersed_args()
+    #TODO
+    p.add_option('-t', '--time', dest='time', action='store',
+        help='Unsupported, defaults to current time.')
+    (options, args) = p.parse_args(opts)
+
+    action = 'schedule_check'
+    execute_action_services(services, action)
+    invalidate_cache()
+    return 0
+
+
 def action_acknowledge_services(opts, services):
     '''Acknowledge problem for a service. Usage:
-        --comment=TEXT   	Comment on the acknowledged problem.
-        --sticky=TRUE/FALSE  	[defaults to TRUE] If sticky, an acknowledgement hangs around
+        -c, --comment=TEXT   	Comment on the acknowledged problem.
+        -s, --sticky=TRUE/FALSE  	[defaults to TRUE] If sticky, an acknowledgement hangs around
                                 until a host reaches "OK" - otherwise, it goes away on next
                                 state change.
-        --notify=TRUE/FALSE	[defaults to TRUE] If TRUE, sends notification that an
+        -n, --notify=TRUE/FALSE	[defaults to TRUE] If TRUE, sends notification that an
                                 acknowledgement has occurred.
-        --persistent=TRUE/FALSE	[defaults to FALSE] If TRUE, the comment will remain after the
+        -p, --persistent=TRUE/FALSE	[defaults to FALSE] If TRUE, the comment will remain after the
                                 host returns to "OK" state.
-        --author=STR		[defaults to "nagios-api"] Who is doing the acknowledging.
+        -a, --author=STR		[defaults to "nagios-api"] Who is doing the acknowledging.
 
     '''
     defaults = CONFIG['ncli']['commenting']
     p = OptionParser(usage=trim(action_acknowledge_services.__doc__))
     p.disable_interspersed_args()
     p.add_option('-c', '--comment', dest='comment', action='store',
-        help="Comment on the acknowledged problem.")
+        help='Comment on the acknowledged problem.')
     p.add_option('-s', '--sticky', dest='sticky', action='store_true',
         help='Does acknowledgement hang around until "OK" reached by host?')
     p.add_option('-n', '--notify', dest='notify', action='store_true',
@@ -476,20 +349,24 @@ def action_acknowledge_services(opts, services):
         shared_args += ["comment=%s" % options.comment]
     else:
         return critical('Did not include comment when required!')
+
     shared_args += ["sticky=%s" % int(options.sticky)]
     shared_args += ["notify=%s" % int(options.notify)]
     shared_args += ["persistent=%s" % int(options.persistent)]
-    if options.author:
-        shared_args += ['author=%s' % options.author]
+    shared_args += ['author=%s' % options.author]
 
     execute_action_services(services, 'acknowledge_problem', shared_args)
     invalidate_cache()
     return 0
 
+
 def action_enable_notifications_services(opts, services):
     action_notifications_services(['--enable'], services)
+
+
 def action_disable_notifications_services(opts, services):
     action_notifications_services(['--disable'], services)
+
 
 def action_notifications_services(opts, services):
     '''Enable/disable notifications for a service.
@@ -506,10 +383,70 @@ def action_notifications_services(opts, services):
         help='Enable notifications for service')
     p.set_defaults(enable=None)
     (options, args) = p.parse_args(opts)
-    if options.enable == None:
+
+    if options.enable is None:
         p.error("The notify action requires you to add either --disable or --enable.")
 
     action = 'enable_notifications' if options.enable else 'disable_notifications'
+    execute_action_services(services, action)
+    invalidate_cache()
+    return 0
+
+
+def action_schedule_downtime(opts, services):
+    '''Create a fixed scheduled downtime for a service. Usage:
+        -a, --author=NAME     Specify an author to record this downtime for.
+            --cancel          Cancels downtime for the service.
+        -c, --comment=TEXT    Leave descriptive text about the downtime.
+        -d, --duration=STR    Specify how long to schedule downtime for. Specify a duration
+        using a format of 2h / 5d / 10s / 60m
+        -t, --time=STR        Specify when downtime should start. Unsupported.
+
+    '''
+    defaults = CONFIG['ncli']['commenting']
+    p = OptionParser(usage=trim(action_schedule_downtime.__doc__))
+    p.disable_interspersed_args()
+    p.add_option('-a', '--author', dest='author', action='store',
+        help='Author to blame for this downtime')
+    p.add_option('--cancel', dest='cancel', action='store_true',
+        help='Cancels scheduled downtime.')
+    p.add_option('-c', '--comment', dest='comment', action='store',
+        help='Explanatory comment to leave on the downtime')
+    p.add_option('-d', '--duration', dest='duration', action='store',
+        help='Duration of time to schedule downtime.')
+    p.add_option('-t', '--time', dest='time', action='store',
+        help='Unsupported, defaults to current time.')
+    p.set_defaults(
+            author=defaults['author'],
+            cancel = False,
+            comment=None,
+            duration='1h',
+            time=None
+    )
+    (options, args) = p.parse_args(opts)
+
+    if options.cancel:
+        return action_cancel_downtime(opts, services)
+
+    duration_seconds = time_to_seconds(options.duration)
+    if duration_seconds is None:
+        p.error('Invalid duration, must be in a format like "2h"')
+
+    shared_args = []
+    shared_args += ['author=%s' % options.author]
+    shared_args += ['comment=%s' % options.comment]
+    shared_args += ['duration=%d' % duration_seconds]
+    action = 'schedule_downtime'
+    execute_action_services(services, action, shared_args)
+    invalidate_cache()
+    return 0
+
+
+def action_cancel_downtime(opts, services):
+    '''Cancel a scheduled downtime for a service.
+
+    '''
+    action = 'cancel_downtime'
     execute_action_services(services, action)
     invalidate_cache()
     return 0
@@ -537,6 +474,7 @@ def do_raw(args):
         print dumps(resobj['content'])
     return 0
 
+
 def critical(msg, retval=1):
     '''Print a message to STDERR and return a failure code.
 
@@ -544,8 +482,10 @@ def critical(msg, retval=1):
     print >>sys.stderr, txtcolor.CRIT + msg + txtcolor.ENDC
     return retval
 
+
 def cache_path():
     return "%s/cache.json" % path.dirname(path.realpath(__file__))
+
 
 def invalidate_cache():
     try:
