@@ -27,12 +27,16 @@ Usage:
                         description containing unicorn with provided comment and the default settings from config.yml
     ncli services -ph lb12 schedule
                         Schedules all services on lb12 to be rechecked immediately
+    ncli services -h test01 downtime -d 2h
+                        Schedules downtime for all services on test01 for two hours
 
     Actions:
         show (default)
         (ack)nowledge
         [enable|disable]-notifications
         schedule(-check)
+        (schedule-)downtime
+        cancel-downtime
 
         WIP
         [enable|disable]-event-handlers
